@@ -3,6 +3,8 @@ import AppKit
 if CommandLine.arguments.contains("--diagnostic-list")
   || CommandLine.arguments.contains("--diagnostic-tone")
   || CommandLine.arguments.contains("--diagnostic-capture")
+  || CommandLine.arguments.contains("--diagnostic-outputs")
+  || CommandLine.arguments.contains("--diagnostic-select-output")
 {
   MainActor.assumeIsolated {
     DiagnosticRunner.run(arguments: CommandLine.arguments)

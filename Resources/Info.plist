@@ -7,15 +7,15 @@
     <key>CFBundleExecutable</key>
     <string>MacOSAudioForward</string>
     <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
+    <string>AppIcon.icns</string>
     <key>CFBundleIdentifier</key>
     <string>dev.rallen.macos-audio-forward</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>macOS Audio Forward</string>
+    <string>Audio Forward</string>
     <key>CFBundleDisplayName</key>
-    <string>macOS Audio Forward</string>
+    <string>Audio Forward</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

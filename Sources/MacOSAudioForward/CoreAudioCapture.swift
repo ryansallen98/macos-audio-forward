@@ -20,8 +20,16 @@ final class CoreAudioCapture {
   private var sampleRate: UInt32 = 48_000
   private var running = false
 
-  func start(remoteName: String) throws {
-    guard !running else { return }
+  var isPrepared: Bool {
+    aggregateID != kAudioObjectUnknown && tapID != kAudioObjectUnknown
+  }
+
+  var outputDeviceID: AudioDeviceID? {
+    aggregateID == kAudioObjectUnknown ? nil : aggregateID
+  }
+
+  func prepare(outputName: String = "Audio Forward") throws {
+    guard !isPrepared else { return }
     CoreAudioUtility.cleanupStaleAggregates()
 
     originalOutput = try CoreAudioUtility.defaultOutputDevice()
@@ -44,11 +52,9 @@ final class CoreAudioCapture {
     do {
       let tapUID = try readTapUID(createdTap)
       sampleRate = try readTapSampleRate(createdTap)
-      let safeName = remoteName.isEmpty ? "Remote Mac" : remoteName
-      let aggregateUID = CoreAudioUtility.aggregateUIDPrefix + UUID().uuidString
       let aggregateDescription: [String: Any] = [
-        kAudioAggregateDeviceUIDKey: aggregateUID,
-        kAudioAggregateDeviceNameKey: "\(safeName) via Thunderbolt",
+        kAudioAggregateDeviceUIDKey: CoreAudioUtility.forwardOutputUID,
+        kAudioAggregateDeviceNameKey: outputName,
         kAudioAggregateDeviceSubDeviceListKey: [
           [kAudioSubDeviceUIDKey: baseDeviceUID]
         ],
@@ -67,33 +73,94 @@ final class CoreAudioCapture {
       var createdAggregate = AudioDeviceID(kAudioObjectUnknown)
       try CoreAudioUtility.check(
         AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &createdAggregate),
-        operation: "Create the remote audio output")
+        operation: "Create the Audio Forward output")
       aggregateID = createdAggregate
-
       try setPreferredBufferSize(on: createdAggregate)
-      try createAndStartIO(on: createdAggregate)
-      try CoreAudioUtility.setDefaultOutputDevice(createdAggregate)
-      try? CoreAudioUtility.setDefaultOutputDevice(createdAggregate, systemSounds: true)
-      running = true
+    } catch {
+      teardown(restoreOutput: false)
+      throw error
+    }
+  }
+
+  func start(remoteName _: String) throws {
+    guard !running else { return }
+    try prepare()
+    do {
+      try startForwarding()
+      try selectForwardOutput()
     } catch {
       stop()
       throw error
     }
   }
 
-  func stop() {
+  func startForwarding() throws {
+    guard !running else { return }
+    guard aggregateID != kAudioObjectUnknown else {
+      throw CoreAudioError(
+        operation: "Start Audio Forward",
+        status: kAudioHardwareBadDeviceError)
+    }
+    do {
+      try createAndStartIO(on: aggregateID)
+      running = true
+    } catch {
+      stopForwarding()
+      throw error
+    }
+  }
+
+  func stopForwarding() {
+    if aggregateID != kAudioObjectUnknown, let ioProcID {
+      _ = AudioDeviceStop(aggregateID, ioProcID)
+      _ = AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
+    }
+    ioProcID = nil
+    running = false
+  }
+
+  func selectForwardOutput() throws {
+    guard aggregateID != kAudioObjectUnknown else {
+      throw CoreAudioError(
+        operation: "Select Audio Forward",
+        status: kAudioHardwareBadDeviceError)
+    }
+    try CoreAudioUtility.setDefaultOutputDevice(aggregateID)
+    try? CoreAudioUtility.setDefaultOutputDevice(aggregateID, systemSounds: true)
+  }
+
+  func isForwardOutput(_ device: AudioDeviceID) -> Bool {
+    aggregateID != kAudioObjectUnknown && device == aggregateID
+  }
+
+  func rememberFallbackOutput(_ device: AudioDeviceID) {
+    guard device != kAudioObjectUnknown, !isForwardOutput(device) else { return }
+    originalOutput = device
+    originalSystemOutput = device
+  }
+
+  func restoreFallbackOutput() {
     if originalOutput != kAudioObjectUnknown {
       try? CoreAudioUtility.setDefaultOutputDevice(originalOutput)
     }
     if originalSystemOutput != kAudioObjectUnknown {
       try? CoreAudioUtility.setDefaultOutputDevice(originalSystemOutput, systemSounds: true)
     }
+  }
 
-    if aggregateID != kAudioObjectUnknown, let ioProcID {
-      _ = AudioDeviceStop(aggregateID, ioProcID)
-      _ = AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
+  func stop() {
+    teardown(restoreOutput: true)
+  }
+
+  func teardown(restoreOutput: Bool = true) {
+    if restoreOutput,
+      let current = try? CoreAudioUtility.defaultOutputDevice(),
+      isForwardOutput(current)
+    {
+      restoreFallbackOutput()
     }
-    ioProcID = nil
+
+    stopForwarding()
 
     if aggregateID != kAudioObjectUnknown {
       _ = AudioHardwareDestroyAggregateDevice(aggregateID)
@@ -106,7 +173,6 @@ final class CoreAudioCapture {
     tapID = kAudioObjectUnknown
     originalOutput = kAudioObjectUnknown
     originalSystemOutput = kAudioObjectUnknown
-    running = false
   }
 
   private func readTapUID(_ tap: AudioObjectID) throws -> String {

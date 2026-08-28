@@ -25,10 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     guard let button = statusItem.button else { return }
     button.image = NSImage(
       systemSymbolName: "speaker.wave.2.fill",
-      accessibilityDescription: "macOS Audio Forward")
+      accessibilityDescription: "Audio Forward")
     button.image?.isTemplate = true
-    button.title = " Audio"
-    button.toolTip = "macOS Audio Forward"
+    button.toolTip = "Audio Forward"
     button.target = self
     button.action = #selector(togglePopover)
   }

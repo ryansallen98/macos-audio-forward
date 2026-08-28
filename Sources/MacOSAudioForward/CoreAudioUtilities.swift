@@ -3,6 +3,7 @@ import Foundation
 
 enum CoreAudioUtility {
   static let aggregateUIDPrefix = "dev.rallen.macos-audio-forward.aggregate."
+  static let forwardOutputUID = aggregateUIDPrefix + "output"
 
   static func propertyAddress(
     _ selector: AudioObjectPropertySelector,
@@ -59,20 +60,30 @@ enum CoreAudioUtility {
     return name(of: id)
   }
 
-  static func cleanupStaleAggregates() {
+  static func outputDevices() -> [AudioDeviceID] {
     var address = propertyAddress(kAudioHardwarePropertyDevices)
     var size: UInt32 = 0
     guard AudioObjectGetPropertyDataSize(
       AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr
-    else { return }
+    else { return [] }
 
     let count = Int(size) / MemoryLayout<AudioDeviceID>.size
     var devices = [AudioDeviceID](repeating: 0, count: count)
     guard AudioObjectGetPropertyData(
       AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &devices) == noErr
-    else { return }
+    else { return [] }
 
-    for device in devices {
+    return devices
+  }
+
+  static func outputDevice(named requestedName: String) -> AudioDeviceID? {
+    outputDevices().first {
+      name(of: $0).localizedCaseInsensitiveCompare(requestedName) == .orderedSame
+    }
+  }
+
+  static func cleanupStaleAggregates() {
+    for device in outputDevices() {
       guard
         let uid = stringProperty(kAudioDevicePropertyDeviceUID, object: device),
         uid.hasPrefix(aggregateUIDPrefix)

@@ -1,6 +1,6 @@
 # Privacy
 
-macOS Audio Forward does not collect personal data, use analytics, contact a cloud service, or connect to the internet.
+Audio Forward does not collect personal data, use analytics, contact a cloud service, or connect to the internet.
 
 When you explicitly start forwarding, the app captures the Mac's mixed system-audio output and sends it to the selected peer over the direct `bridge0` Thunderbolt network interface. Audio is held only in short-lived memory buffers for transport and playback. It is not written to disk by the app.
 

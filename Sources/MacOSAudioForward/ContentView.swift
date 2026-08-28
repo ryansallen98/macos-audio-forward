@@ -16,9 +16,9 @@ struct ContentView: View {
       Divider()
       ScrollView {
         VStack(alignment: .leading, spacing: 16) {
-          activityCard
+          audioForwardOutput
           nearbySection
-          outputCard
+          if model.incomingPeerName != nil { receivingStatus }
           if let error = model.lastError { errorCard(error) }
         }
         .padding(16)
@@ -37,7 +37,7 @@ struct ContentView: View {
         .foregroundStyle(model.isActive ? .green : .secondary)
         .frame(width: 34)
       VStack(alignment: .leading, spacing: 2) {
-        Text("macOS Audio Forward").font(.headline)
+        Text("Audio Forward").font(.headline)
         Text(model.activityText)
           .font(.caption)
           .foregroundStyle(.secondary)
@@ -48,55 +48,70 @@ struct ContentView: View {
     .padding(16)
   }
 
-  private var activityCard: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      Label("Thunderbolt Bridge", systemImage: "bolt.horizontal.circle.fill")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-
-      if let sending = model.sendingPeerName {
-        HStack {
-          VStack(alignment: .leading, spacing: 2) {
-            Text("Sending to").font(.caption).foregroundStyle(.secondary)
-            Text(sending).font(.body.weight(.medium))
+  private var audioForwardOutput: some View {
+    GroupBox {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 10) {
+          Image(systemName: "hifispeaker.2.fill")
+            .font(.title3)
+            .foregroundStyle(model.isAudioForwardSelected ? Color.accentColor : .secondary)
+            .frame(width: 28)
+          VStack(alignment: .leading, spacing: 1) {
+            Text("Audio Forward").font(.body.weight(.medium))
+            Text(model.audioForwardDetail)
+              .font(.caption)
+              .foregroundStyle(.secondary)
           }
           Spacer()
-          Button("Stop") { model.stopSending() }
+          if model.audioForwardReady {
+            Button(model.isAudioForwardSelected ? "Stop" : "Use as Output") {
+              if model.isAudioForwardSelected {
+                model.stopSending()
+              } else {
+                model.useAudioForward()
+              }
+            }
             .controlSize(.small)
+          } else {
+            Button("Retry") { model.retryAudioForwardOutput() }
+              .controlSize(.small)
+          }
         }
-      }
 
-      if let incoming = model.incomingPeerName {
-        VStack(alignment: .leading, spacing: 2) {
-          Text("Receiving from").font(.caption).foregroundStyle(.secondary)
-          Text(incoming).font(.body.weight(.medium))
+        Divider()
+
+        LabeledContent("Current output") {
+          Text(model.currentOutputName)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
         }
-      }
+        .font(.caption)
 
-      if model.sendingPeerName == nil && model.incomingPeerName == nil {
-        Text("This Mac is available to receive. Choose another Mac below to send this Mac's system audio.")
-          .font(.caption)
+        Text("Audio Forward also appears in Control Centre and System Settings while this app is running.")
+          .font(.caption2)
           .foregroundStyle(.secondary)
       }
+      .padding(.vertical, 2)
+    } label: {
+      Label("Output", systemImage: "speaker.wave.2")
+        .font(.subheadline.weight(.semibold))
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(12)
-    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
   }
 
   private var nearbySection: some View {
     VStack(alignment: .leading, spacing: 8) {
       HStack(alignment: .firstTextBaseline) {
-        Text("Nearby Macs").font(.subheadline.weight(.semibold))
+        Label("Destination", systemImage: "desktopcomputer")
+          .font(.subheadline.weight(.semibold))
         Spacer()
-        Text("Thunderbolt only").font(.caption2).foregroundStyle(.secondary)
+        Text("Thunderbolt Bridge").font(.caption2).foregroundStyle(.secondary)
       }
 
       if model.peers.isEmpty {
         VStack(alignment: .leading, spacing: 5) {
-          Text("No other Audio Forward app found.")
+          Text("No other Mac found.")
             .font(.callout)
-          Text("Install and open the app on the other Mac, then confirm that Thunderbolt Bridge is connected in Network settings.")
+          Text("The saved destination will reconnect automatically when it appears.")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -117,9 +132,10 @@ struct ContentView: View {
   private func peerRow(_ peer: DiscoveredPeer) -> some View {
     let sending = model.sendingPeerID == peer.id
     let connecting = model.connectingPeerID == peer.id
+    let selected = model.preferredPeerID == peer.id
     return HStack(spacing: 10) {
-      Image(systemName: "desktopcomputer")
-        .foregroundStyle(sending ? .green : .secondary)
+      Image(systemName: selected ? "checkmark.circle.fill" : "desktopcomputer")
+        .foregroundStyle(sending ? .green : (selected ? Color.accentColor : .secondary))
         .frame(width: 26)
       VStack(alignment: .leading, spacing: 1) {
         Text(peer.name).lineLimit(1)
@@ -128,29 +144,33 @@ struct ContentView: View {
           .foregroundStyle(.secondary)
       }
       Spacer()
-      Button(sending ? "Stop" : (connecting ? "Connecting…" : "Send Audio")) {
-        model.toggleSending(to: peer)
+      Button(selected ? (sending ? "Active" : (connecting ? "Connecting…" : "Selected")) : "Select") {
+        model.selectDestination(peer)
       }
       .controlSize(.small)
-      .disabled(connecting)
+      .disabled(selected)
     }
     .padding(.horizontal, 10)
     .padding(.vertical, 9)
   }
 
-  private var outputCard: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Label("Current output on this Mac", systemImage: "hifispeaker.2")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-      Text(model.currentOutputName).font(.callout.weight(.medium))
-      Text("Received audio follows this Mac's selected output automatically.")
-        .font(.caption2)
-        .foregroundStyle(.secondary)
+  private var receivingStatus: some View {
+    GroupBox {
+      HStack {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Receiving from").font(.caption).foregroundStyle(.secondary)
+          Text(model.incomingPeerName ?? "Another Mac").font(.body.weight(.medium))
+        }
+        Spacer()
+        Image(systemName: "waveform")
+          .symbolEffect(.variableColor.iterative)
+          .foregroundStyle(.green)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+    } label: {
+      Label("Incoming Audio", systemImage: "arrow.down.circle")
+        .font(.subheadline.weight(.semibold))
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(12)
-    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
   }
 
   private func errorCard(_ message: String) -> some View {

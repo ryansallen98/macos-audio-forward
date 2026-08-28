@@ -4,6 +4,33 @@ import Foundation
 @MainActor
 enum DiagnosticRunner {
   static func run(arguments: [String]) -> Never {
+    if arguments.contains("--diagnostic-outputs") {
+      let current = try? CoreAudioUtility.defaultOutputDevice()
+      for device in CoreAudioUtility.outputDevices() {
+        print("\(device == current ? "*" : " ")\t\(CoreAudioUtility.name(of: device))")
+      }
+      exit(EXIT_SUCCESS)
+    }
+
+    if let option = arguments.firstIndex(of: "--diagnostic-select-output"),
+      option + 1 < arguments.count
+    {
+      let name = arguments[option + 1]
+      guard let device = CoreAudioUtility.outputDevice(named: name) else {
+        fputs("No output named \(name) was found.\n", stderr)
+        exit(EXIT_FAILURE)
+      }
+      do {
+        try CoreAudioUtility.setDefaultOutputDevice(device)
+        try? CoreAudioUtility.setDefaultOutputDevice(device, systemSounds: true)
+        print("Selected \(CoreAudioUtility.name(of: device)).")
+        exit(EXIT_SUCCESS)
+      } catch {
+        fputs("Could not select \(name): \(error.localizedDescription)\n", stderr)
+        exit(EXIT_FAILURE)
+      }
+    }
+
     let listOnly = arguments.contains("--diagnostic-list")
     let captureMode = arguments.contains("--diagnostic-capture")
     let requestedPeer: String? = {

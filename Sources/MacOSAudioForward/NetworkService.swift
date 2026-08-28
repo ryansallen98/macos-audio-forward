@@ -41,6 +41,7 @@ final class NetworkService {
   private var incomingConnection: NWConnection?
   private var incomingDecoder = ForwardStreamDecoder()
   private var incomingHandshake: ForwardHandshake?
+  private var peerMetadataByService: [String: [String: String]] = [:]
 
   init(instanceID: String, localName: String, appVersion: String) {
     self.instanceID = instanceID
@@ -170,22 +171,24 @@ final class NetworkService {
 
   private func updatePeers(from results: Set<NWBrowser.Result>) {
     var byID: [String: DiscoveredPeer] = [:]
+    var activeServices = Set<String>()
 
     for result in results {
       guard let bridgeInterface = result.interfaces.first(where: { $0.name == "bridge0" }) else {
         continue
       }
 
-      let txt: [String: String]
-      if case .bonjour(let record) = result.metadata {
+      let serviceName = Self.serviceName(from: result.endpoint)
+      activeServices.insert(serviceName)
+      var txt = peerMetadataByService[serviceName] ?? [:]
+      if case .bonjour(let record) = result.metadata, !record.dictionary.isEmpty {
         txt = record.dictionary
-      } else {
-        txt = [:]
+        peerMetadataByService[serviceName] = txt
       }
 
-      let peerID = txt["id"] ?? Self.serviceName(from: result.endpoint)
+      let peerID = txt["id"] ?? serviceName
       guard peerID != instanceID else { continue }
-      let name = txt["name"] ?? Self.serviceName(from: result.endpoint)
+      let name = txt["name"] ?? serviceName
       let peer = DiscoveredPeer(
         id: peerID,
         name: name,
@@ -195,6 +198,8 @@ final class NetworkService {
       )
       byID[peerID] = peer
     }
+
+    peerMetadataByService = peerMetadataByService.filter { activeServices.contains($0.key) }
 
     let peers = byID.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     DispatchQueue.main.async { [weak self] in

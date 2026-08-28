@@ -1,17 +1,18 @@
-# macOS Audio Forward 0.1.2
+# Audio Forward 0.2.0
 
-This update restores the intended menu-bar-only workflow and improves Bartender 6 discovery.
+This release makes Audio Forward behave like a native macOS speaker while preserving its menu-bar-only workflow.
 
 ## Highlights
 
 - Install the same app on both Macs.
-- Find the persistent **Audio** control in the menu bar or Bartender.
-- Click **Audio** to open an anchored menu-bar dropdown.
+- Configure and save a destination Mac in the speaker-icon menu-bar dropdown.
+- Select **Audio Forward** in Control Centre or Sound settings like any other speaker.
+- Reconnect to the saved Mac automatically after login, wake, or a temporary disconnect.
+- Switch to another local output to stop forwarding.
+- Restore the previous output and remove the app-managed device when the app quits.
+- Keep the controls in an anchored menu-bar dropdown compatible with Bartender 6.
 - Run without any standalone window or Dock icon.
-- Discover peers automatically over `bridge0`.
-- Send in either direction from the menu bar.
 - Play through the receiving Mac's current default output.
-- Restore local audio automatically when forwarding stops.
 
 ## Compatibility
 

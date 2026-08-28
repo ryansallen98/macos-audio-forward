@@ -9,6 +9,10 @@ final class AudioForwardModel: ObservableObject {
   @Published private(set) var sendingPeerID: String?
   @Published private(set) var sendingPeerName: String?
   @Published private(set) var incomingPeerName: String?
+  @Published private(set) var preferredPeerID: String?
+  @Published private(set) var preferredPeerName: String?
+  @Published private(set) var audioForwardReady = false
+  @Published private(set) var isAudioForwardSelected = false
   @Published private(set) var currentOutputName = CoreAudioUtility.currentOutputName()
   @Published private(set) var networkStatus = "Starting…"
   @Published private(set) var lastError: String?
@@ -18,9 +22,10 @@ final class AudioForwardModel: ObservableObject {
   private let capture = CoreAudioCapture()
   private let playback = PlaybackEngine()
   private let network: NetworkService
-  private var outputRefreshTimer: Timer?
+  private var routeMonitorTimer: Timer?
   private var incomingPacketCount = 0
   private var incomingFrameCount: UInt64 = 0
+  private var nextConnectionAttempt = Date.distantPast
 
   init() {
     let defaults = UserDefaults.standard
@@ -31,6 +36,8 @@ final class AudioForwardModel: ObservableObject {
       instanceID = UUID().uuidString
       defaults.set(instanceID, forKey: "instanceID")
     }
+    preferredPeerID = defaults.string(forKey: "preferredPeerID")
+    preferredPeerName = defaults.string(forKey: "preferredPeerName")
 
     let localName = Host.current().localizedName
       ?? ProcessInfo.processInfo.hostName.replacingOccurrences(of: ".local", with: "")
@@ -42,22 +49,23 @@ final class AudioForwardModel: ObservableObject {
   }
 
   func start() {
-    CoreAudioUtility.cleanupStaleAggregates()
     do {
       try network.start()
     } catch {
       lastError = "Could not start Audio Forward: \(error.localizedDescription)"
       networkStatus = "Receiver unavailable"
     }
-    outputRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
+    prepareAudioForwardOutput()
+    refreshOutputState()
+    routeMonitorTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
       [weak self] _ in
-      Task { @MainActor [weak self] in self?.refreshOutputName() }
+      Task { @MainActor [weak self] in self?.refreshOutputState() }
     }
   }
 
   func stop() {
-    outputRefreshTimer?.invalidate()
-    outputRefreshTimer = nil
+    routeMonitorTimer?.invalidate()
+    routeMonitorTimer = nil
     capture.stop()
     playback.stop()
     network.stop()
@@ -66,21 +74,65 @@ final class AudioForwardModel: ObservableObject {
   func toggleSending(to peer: DiscoveredPeer) {
     lastError = nil
     if sendingPeerID == peer.id || connectingPeerID == peer.id {
-      connectingPeerID = nil
-      network.disconnect()
+      stopSending()
       return
     }
-    capture.stop()
-    sendingPeerID = nil
-    sendingPeerName = nil
-    connectingPeerID = peer.id
-    networkStatus = "Connecting to \(peer.name)…"
-    network.connect(to: peer)
+    selectDestination(peer)
+    useAudioForward()
   }
 
   func stopSending() {
+    capture.stopForwarding()
+    capture.restoreFallbackOutput()
     connectingPeerID = nil
+    sendingPeerID = nil
+    sendingPeerName = nil
     network.disconnect()
+    refreshOutputState()
+  }
+
+  func selectDestination(_ peer: DiscoveredPeer) {
+    let changed = preferredPeerID != peer.id
+    preferredPeerID = peer.id
+    preferredPeerName = peer.name
+    UserDefaults.standard.set(peer.id, forKey: "preferredPeerID")
+    UserDefaults.standard.set(peer.name, forKey: "preferredPeerName")
+
+    guard changed, isAudioForwardSelected else { return }
+    capture.stopForwarding()
+    connectingPeerID = nil
+    sendingPeerID = nil
+    sendingPeerName = nil
+    nextConnectionAttempt = Date().addingTimeInterval(0.5)
+    networkStatus = "Switching destination to \(peer.name)…"
+    network.disconnect()
+  }
+
+  func useAudioForward() {
+    lastError = nil
+    if !audioForwardReady {
+      prepareAudioForwardOutput()
+      guard audioForwardReady else { return }
+    }
+    if preferredPeerID == nil, let onlyPeer = peers.first, peers.count == 1 {
+      selectDestination(onlyPeer)
+    }
+    guard preferredPeerID != nil else {
+      lastError = "Choose a destination Mac before using the Audio Forward output."
+      return
+    }
+    do {
+      try capture.selectForwardOutput()
+      refreshOutputState()
+    } catch {
+      lastError = "Could not select Audio Forward: \(error.localizedDescription)"
+    }
+  }
+
+  func retryAudioForwardOutput() {
+    lastError = nil
+    prepareAudioForwardOutput()
+    refreshOutputState()
   }
 
   func dismissError() {
@@ -135,6 +187,20 @@ final class AudioForwardModel: ObservableObject {
     sendingPeerName != nil || incomingPeerName != nil || connectingPeerID != nil
   }
 
+  var preferredPeerIsAvailable: Bool {
+    preferredPeer != nil
+  }
+
+  var audioForwardDetail: String {
+    guard let preferredPeerName else { return "Choose a destination below" }
+    if sendingPeerID != nil { return "Forwarding to \(preferredPeerName)" }
+    if connectingPeerID != nil { return "Connecting to \(preferredPeerName)…" }
+    if preferredPeerIsAvailable { return "Routes to \(preferredPeerName)" }
+    return isAudioForwardSelected
+      ? "Waiting for \(preferredPeerName)"
+      : "Routes to \(preferredPeerName) when available"
+  }
+
   private func configureServices() {
     capture.onAudio = { [weak network] payload, rate, channels, frames in
       network?.sendAudio(payload: payload, sampleRate: rate, channels: channels, frames: frames)
@@ -145,7 +211,19 @@ final class AudioForwardModel: ObservableObject {
     }
 
     network.onPeersChanged = { [weak self] peers in
-      self?.peers = peers
+      guard let self else { return }
+      self.peers = peers
+      if self.preferredPeerID == nil, peers.count == 1, let peer = peers.first {
+        self.selectDestination(peer)
+      } else if let preferredPeerName = self.preferredPeerName,
+        let matchingPeer = peers.first(where: {
+          $0.name.localizedCaseInsensitiveCompare(preferredPeerName) == .orderedSame
+        }), self.preferredPeerID != matchingPeer.id
+      {
+        self.preferredPeerID = matchingPeer.id
+        UserDefaults.standard.set(matchingPeer.id, forKey: "preferredPeerID")
+      }
+      self.attemptConnectionIfNeeded()
     }
     network.onStatus = { [weak self] status in
       self?.networkStatus = status
@@ -155,13 +233,17 @@ final class AudioForwardModel: ObservableObject {
     }
     network.onOutgoingReady = { [weak self] peer in
       guard let self else { return }
+      guard self.isAudioForwardSelected, peer.id == self.preferredPeerID else {
+        self.network.disconnect()
+        return
+      }
       do {
-        try self.capture.start(remoteName: peer.name)
+        try self.capture.startForwarding()
         self.connectingPeerID = nil
         self.sendingPeerID = peer.id
         self.sendingPeerName = peer.name
         self.networkStatus = "Connected over Thunderbolt Bridge"
-        self.refreshOutputName()
+        self.refreshOutputState()
       } catch {
         self.connectingPeerID = nil
         self.lastError = "Could not capture this Mac's audio: \(error.localizedDescription)"
@@ -170,11 +252,12 @@ final class AudioForwardModel: ObservableObject {
     }
     network.onOutgoingStopped = { [weak self] reason in
       guard let self else { return }
-      self.capture.stop()
+      self.capture.stopForwarding()
       self.connectingPeerID = nil
       self.sendingPeerID = nil
       self.sendingPeerName = nil
-      self.refreshOutputName()
+      self.nextConnectionAttempt = Date().addingTimeInterval(2)
+      self.refreshOutputState()
       if let reason { self.lastError = "Audio forwarding stopped: \(reason)" }
     }
     network.onIncomingStarted = { [weak self] handshake in
@@ -197,8 +280,72 @@ final class AudioForwardModel: ObservableObject {
     }
   }
 
-  private func refreshOutputName() {
-    currentOutputName = CoreAudioUtility.currentOutputName()
+  private var preferredPeer: DiscoveredPeer? {
+    if let preferredPeerID, let exact = peers.first(where: { $0.id == preferredPeerID }) {
+      return exact
+    }
+    guard let preferredPeerName else { return nil }
+    return peers.first {
+      $0.name.localizedCaseInsensitiveCompare(preferredPeerName) == .orderedSame
+    }
+  }
+
+  private func prepareAudioForwardOutput() {
+    guard !audioForwardReady else { return }
+    do {
+      try capture.prepare()
+      audioForwardReady = true
+    } catch {
+      audioForwardReady = false
+      lastError = "Could not create the Audio Forward output: \(error.localizedDescription)"
+    }
+  }
+
+  private func refreshOutputState() {
+    guard let outputID = try? CoreAudioUtility.defaultOutputDevice() else {
+      currentOutputName = "No output selected"
+      return
+    }
+
+    let wasSelected = isAudioForwardSelected
+    isAudioForwardSelected = capture.isForwardOutput(outputID)
+    currentOutputName = CoreAudioUtility.name(of: outputID)
+
+    if isAudioForwardSelected {
+      attemptConnectionIfNeeded()
+    } else {
+      capture.rememberFallbackOutput(outputID)
+      if wasSelected || sendingPeerID != nil || connectingPeerID != nil {
+        capture.stopForwarding()
+        connectingPeerID = nil
+        sendingPeerID = nil
+        sendingPeerName = nil
+        network.disconnect()
+        networkStatus = "Ready on Thunderbolt Bridge"
+      }
+    }
+  }
+
+  private func attemptConnectionIfNeeded() {
+    guard isAudioForwardSelected,
+      sendingPeerID == nil,
+      connectingPeerID == nil,
+      Date() >= nextConnectionAttempt
+    else { return }
+
+    guard let peer = preferredPeer else {
+      if let preferredPeerName {
+        networkStatus = "Waiting for \(preferredPeerName)…"
+      } else {
+        networkStatus = "Choose a destination for Audio Forward"
+      }
+      return
+    }
+
+    connectingPeerID = peer.id
+    networkStatus = "Connecting to \(peer.name)…"
+    nextConnectionAttempt = Date().addingTimeInterval(2)
+    network.connect(to: peer)
   }
 
   private func refreshLaunchAtLoginState() {
