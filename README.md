@@ -15,7 +15,11 @@ It is designed for a MacBook and desktop Mac that already share a Thunderbolt ne
 - An app-managed **Audio Forward** device in macOS's native output picker
 - A saved destination that reconnects automatically after login, wake, or a temporary disconnect
 - Received sound follows the destination Mac's current output device
-- Low-latency stereo PCM transport with buffering and clock-drift correction
+- Lossless 32-bit floating-point stereo PCM with no codec or enhancement stage
+- A preallocated real-time ring buffer with adaptive latency and underrun recovery
+- Continuous, tightly bounded clock-drift correction between the two Macs
+- Live connection heartbeats with automatic stale-session recovery
+- Single-instance protection so only one process can own the virtual output
 - Automatic restoration of the sender's previous output when forwarding stops
 - Optional Launch at Login using Apple's `SMAppService`
 - Native Swift/AppKit/SwiftUI app with no third-party dependencies
@@ -27,7 +31,7 @@ It is designed for a MacBook and desktop Mac that already share a Thunderbolt ne
 - A direct Thunderbolt cable between the Macs
 - Thunderbolt Bridge enabled in **System Settings → Network** on both Macs
 
-Version 0.2.0 is an Apple Silicon preview build. Intel Macs and older macOS releases are not currently supported.
+Version 0.3.0 is an Apple Silicon preview build. Intel Macs and older macOS releases are not currently supported.
 
 ## Install
 
@@ -52,7 +56,9 @@ The preview archive is ad-hoc signed because the project does not yet have an Ap
 
 The app uses macOS's public Core Audio process-tap API to create an app-managed aggregate output named **Audio Forward**. The device is prepared while the app runs, but its capture I/O starts only when the user selects it. The tap uses `mutedWhenTapped` so active playback is forwarded instead of duplicated locally. No permanent virtual-audio driver, system extension, privileged helper, or reboot is required.
 
-The two app instances advertise and discover a Bonjour service. Discovery, outgoing connections, and accepted incoming connections are all checked against the `bridge0` interface. Audio is transported as 32-bit floating-point stereo PCM over TCP with a small receiver buffer and bounded clock-rate correction.
+The two app instances advertise and discover a Bonjour service. Discovery, outgoing connections, and accepted incoming connections are all checked against the `bridge0` interface. Audio is transported as uncompressed 32-bit floating-point stereo PCM over TCP.
+
+On the receiver, a dedicated producer queue writes network audio into a preallocated lock-free ring buffer. Core Audio pulls from that buffer in its real-time render callback, so packet decoding, AppKit, SwiftUI, and menu activity cannot delay the speaker. The buffer begins near 70 ms, grows only after a measured underrun, and gradually contracts toward 55 ms during sustained stability. A slow feedback controller keeps the two hardware clocks aligned with a correction bounded to ±0.1%. Normal playback has no fades, codec, limiter, or other signal processing; a short fade is used only after an interruption to avoid a click.
 
 Because it uses Thunderbolt networking instead of AirPlay, it does not take over the Continuity/AirPlay session used by Universal Control.
 
@@ -79,7 +85,7 @@ Create the release archive and SHA-256 checksum with:
 
 ## Known limitations
 
-- The current release carries stereo system audio only; microphone forwarding is not included.
+- The current release carries stereo system audio only; microphone forwarding and multichannel surround are not included.
 - Audio is uncompressed and intended for a direct Thunderbolt Bridge, not ordinary Wi-Fi or routed networks.
 - Each sending Mac requires macOS System Audio Recording permission.
 - An abrupt system crash or forced power-off can leave a temporary aggregate device behind. The app removes its stale devices at the next launch.

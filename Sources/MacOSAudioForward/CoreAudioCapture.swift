@@ -5,6 +5,7 @@ final class CoreAudioCapture {
   typealias AudioHandler = (_ payload: Data, _ sampleRate: UInt32, _ channels: UInt16, _ frames: UInt32) -> Void
 
   var onAudio: AudioHandler?
+  var onFirstAudio: (() -> Void)?
 
   private let captureQueue = DispatchQueue(
     label: "dev.rallen.audio-forward.capture",
@@ -19,6 +20,7 @@ final class CoreAudioCapture {
   private var originalSystemOutput = AudioDeviceID(kAudioObjectUnknown)
   private var sampleRate: UInt32 = 48_000
   private var running = false
+  private var deliveredFirstAudio = false
 
   var isPrepared: Bool {
     aggregateID != kAudioObjectUnknown && tapID != kAudioObjectUnknown
@@ -30,9 +32,9 @@ final class CoreAudioCapture {
 
   func prepare(outputName: String = "Audio Forward") throws {
     guard !isPrepared else { return }
-    CoreAudioUtility.cleanupStaleAggregates()
+    let cleanupFallback = CoreAudioUtility.cleanupStaleAggregates()
 
-    originalOutput = try CoreAudioUtility.defaultOutputDevice()
+    originalOutput = try (cleanupFallback ?? CoreAudioUtility.defaultOutputDevice())
     originalSystemOutput = (try? CoreAudioUtility.defaultOutputDevice(systemSounds: true)) ?? originalOutput
     let baseDeviceUID = try CoreAudioUtility.uid(of: originalOutput)
 
@@ -102,6 +104,7 @@ final class CoreAudioCapture {
         status: kAudioHardwareBadDeviceError)
     }
     do {
+      deliveredFirstAudio = false
       try createAndStartIO(on: aggregateID)
       running = true
     } catch {
@@ -130,7 +133,10 @@ final class CoreAudioCapture {
   }
 
   func isForwardOutput(_ device: AudioDeviceID) -> Bool {
-    aggregateID != kAudioObjectUnknown && device == aggregateID
+    if aggregateID != kAudioObjectUnknown, device == aggregateID {
+      return true
+    }
+    return (try? CoreAudioUtility.uid(of: device)) == CoreAudioUtility.forwardOutputUID
   }
 
   func rememberFallbackOutput(_ device: AudioDeviceID) {
@@ -232,6 +238,10 @@ final class CoreAudioCapture {
     let mutableList = UnsafeMutablePointer<AudioBufferList>(mutating: inputData)
     let buffers = UnsafeMutableAudioBufferListPointer(mutableList)
     guard let packet = Self.interleavedStereo(from: buffers) else { return }
+    if !deliveredFirstAudio {
+      deliveredFirstAudio = true
+      onFirstAudio?()
+    }
     onAudio?(packet.data, sampleRate, packet.channels, packet.frames)
   }
 

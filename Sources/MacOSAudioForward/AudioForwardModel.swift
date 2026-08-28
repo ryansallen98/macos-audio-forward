@@ -18,14 +18,19 @@ final class AudioForwardModel: ObservableObject {
   @Published private(set) var lastError: String?
   @Published private(set) var launchAtLogin = false
   @Published private(set) var loginRequiresApproval = false
+  @Published private(set) var playbackMetrics = PlaybackMetrics.idle
 
   private let capture = CoreAudioCapture()
   private let playback = PlaybackEngine()
   private let network: NetworkService
   private var routeMonitorTimer: Timer?
-  private var incomingPacketCount = 0
-  private var incomingFrameCount: UInt64 = 0
   private var nextConnectionAttempt = Date.distantPast
+  private var latestPlaybackMetrics = PlaybackMetrics.idle
+  private var nextMetricsPersistence = Date.distantPast
+  private var interfaceVisible = false
+  private var captureIsProducingFrames = false
+  private var captureWatchdog: DispatchWorkItem?
+  private var lastDiagnosticState: [String: String] = [:]
 
   init() {
     let defaults = UserDefaults.standard
@@ -66,6 +71,8 @@ final class AudioForwardModel: ObservableObject {
   func stop() {
     routeMonitorTimer?.invalidate()
     routeMonitorTimer = nil
+    captureWatchdog?.cancel()
+    captureWatchdog = nil
     capture.stop()
     playback.stop()
     network.stop()
@@ -82,6 +89,8 @@ final class AudioForwardModel: ObservableObject {
   }
 
   func stopSending() {
+    captureWatchdog?.cancel()
+    captureWatchdog = nil
     capture.stopForwarding()
     capture.restoreFallbackOutput()
     connectingPeerID = nil
@@ -99,6 +108,9 @@ final class AudioForwardModel: ObservableObject {
     UserDefaults.standard.set(peer.name, forKey: "preferredPeerName")
 
     guard changed, isAudioForwardSelected else { return }
+    captureWatchdog?.cancel()
+    captureWatchdog = nil
+    captureIsProducingFrames = false
     capture.stopForwarding()
     connectingPeerID = nil
     sendingPeerID = nil
@@ -137,6 +149,13 @@ final class AudioForwardModel: ObservableObject {
 
   func dismissError() {
     lastError = nil
+  }
+
+  func setInterfaceVisible(_ visible: Bool) {
+    interfaceVisible = visible
+    if visible {
+      playbackMetrics = latestPlaybackMetrics
+    }
   }
 
   func openSoundSettings() {
@@ -205,9 +224,38 @@ final class AudioForwardModel: ObservableObject {
     capture.onAudio = { [weak network] payload, rate, channels, frames in
       network?.sendAudio(payload: payload, sampleRate: rate, channels: channels, frames: frames)
     }
+    capture.onFirstAudio = { [weak self] in
+      DispatchQueue.main.async {
+        guard let self else { return }
+        self.captureIsProducingFrames = true
+        self.captureWatchdog?.cancel()
+        self.captureWatchdog = nil
+      }
+    }
 
     playback.onError = { [weak self] message in
       self?.lastError = message
+    }
+    playback.onMetrics = { [weak self] metrics in
+      guard let self else { return }
+      self.latestPlaybackMetrics = metrics
+      if self.interfaceVisible {
+        self.playbackMetrics = metrics
+      }
+      if Date() >= self.nextMetricsPersistence {
+        self.persistCurrentMetrics(metrics)
+        self.nextMetricsPersistence = Date().addingTimeInterval(5)
+      }
+    }
+    playback.onSessionEnded = { metrics in
+      UserDefaults.standard.set(
+        Int(clamping: metrics.receivedPackets),
+        forKey: "diagnostics.lastReceivedPacketCount")
+      UserDefaults.standard.set(
+        metrics.receivedFrames,
+        forKey: "diagnostics.lastReceivedFrameCount")
+      UserDefaults.standard.set(metrics.underrunEvents, forKey: "diagnostics.lastUnderrunCount")
+      UserDefaults.standard.set(Date(), forKey: "diagnostics.lastReceivedAt")
     }
 
     network.onPeersChanged = { [weak self] peers in
@@ -243,6 +291,8 @@ final class AudioForwardModel: ObservableObject {
         self.sendingPeerID = peer.id
         self.sendingPeerName = peer.name
         self.networkStatus = "Connected over Thunderbolt Bridge"
+        self.lastError = nil
+        self.beginCaptureHealthCheck(for: peer)
         self.refreshOutputState()
       } catch {
         self.connectingPeerID = nil
@@ -253,6 +303,9 @@ final class AudioForwardModel: ObservableObject {
     network.onOutgoingStopped = { [weak self] reason in
       guard let self else { return }
       self.capture.stopForwarding()
+      self.captureWatchdog?.cancel()
+      self.captureWatchdog = nil
+      self.captureIsProducingFrames = false
       self.connectingPeerID = nil
       self.sendingPeerID = nil
       self.sendingPeerName = nil
@@ -262,21 +315,15 @@ final class AudioForwardModel: ObservableObject {
     }
     network.onIncomingStarted = { [weak self] handshake in
       self?.incomingPeerName = handshake.name
-      self?.incomingPacketCount = 0
-      self?.incomingFrameCount = 0
+      self?.playbackMetrics = .idle
     }
     network.onIncomingStopped = { [weak self] in
       guard let self else { return }
-      UserDefaults.standard.set(self.incomingPacketCount, forKey: "diagnostics.lastReceivedPacketCount")
-      UserDefaults.standard.set(self.incomingFrameCount, forKey: "diagnostics.lastReceivedFrameCount")
-      UserDefaults.standard.set(Date(), forKey: "diagnostics.lastReceivedAt")
       self.incomingPeerName = nil
       self.playback.stop()
     }
-    network.onAudio = { [weak self] message in
-      self?.incomingPacketCount += 1
-      self?.incomingFrameCount += UInt64(message.frames)
-      self?.playback.enqueue(message)
+    network.onAudio = { [weak playback] message in
+      playback?.enqueue(message)
     }
   }
 
@@ -302,6 +349,7 @@ final class AudioForwardModel: ObservableObject {
   }
 
   private func refreshOutputState() {
+    defer { persistRouteDiagnostics() }
     guard let outputID = try? CoreAudioUtility.defaultOutputDevice() else {
       currentOutputName = "No output selected"
       return
@@ -316,6 +364,9 @@ final class AudioForwardModel: ObservableObject {
     } else {
       capture.rememberFallbackOutput(outputID)
       if wasSelected || sendingPeerID != nil || connectingPeerID != nil {
+        captureWatchdog?.cancel()
+        captureWatchdog = nil
+        captureIsProducingFrames = false
         capture.stopForwarding()
         connectingPeerID = nil
         sendingPeerID = nil
@@ -352,5 +403,54 @@ final class AudioForwardModel: ObservableObject {
     let status = SMAppService.mainApp.status
     launchAtLogin = status == .enabled
     loginRequiresApproval = status == .requiresApproval
+  }
+
+  private func beginCaptureHealthCheck(for peer: DiscoveredPeer) {
+    captureWatchdog?.cancel()
+    captureIsProducingFrames = false
+    let watchdog = DispatchWorkItem { [weak self] in
+      guard let self,
+        self.sendingPeerID == peer.id,
+        !self.captureIsProducingFrames
+      else { return }
+      self.lastError = "Audio Forward connected to \(peer.name), but macOS is not providing system audio. Allow the System Audio Recording permission for Audio Forward under Privacy & Security, then reconnect the output."
+    }
+    captureWatchdog = watchdog
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: watchdog)
+  }
+
+  private func persistCurrentMetrics(_ metrics: PlaybackMetrics) {
+    let defaults = UserDefaults.standard
+    defaults.set(metrics.bufferedMilliseconds, forKey: "diagnostics.currentBufferedMilliseconds")
+    defaults.set(metrics.targetMilliseconds, forKey: "diagnostics.currentTargetMilliseconds")
+    defaults.set(metrics.arrivalJitterMilliseconds, forKey: "diagnostics.currentArrivalJitterMilliseconds")
+    defaults.set(metrics.playbackRate, forKey: "diagnostics.currentPlaybackRate")
+    defaults.set(metrics.underrunEvents, forKey: "diagnostics.currentUnderrunCount")
+    defaults.set(metrics.overflowEvents, forKey: "diagnostics.currentOverflowCount")
+    defaults.set(metrics.receivedPackets, forKey: "diagnostics.currentReceivedPacketCount")
+    defaults.set(Date(), forKey: "diagnostics.currentMetricsAt")
+  }
+
+  private func persistRouteDiagnostics() {
+    let outputID = try? CoreAudioUtility.defaultOutputDevice()
+    let outputUID = outputID.flatMap { try? CoreAudioUtility.uid(of: $0) } ?? "Unavailable"
+    let peerSummary = peers.map { "\($0.name)|\($0.id)|\($0.interface.name)" }.joined(separator: ",")
+    let snapshot = [
+      "audioForwardReady": String(audioForwardReady),
+      "isAudioForwardSelected": String(isAudioForwardSelected),
+      "currentOutputName": currentOutputName,
+      "currentOutputUID": outputUID,
+      "preferredPeerID": preferredPeerID ?? "",
+      "preferredPeerName": preferredPeerName ?? "",
+      "discoveredPeers": peerSummary,
+      "connectingPeerID": connectingPeerID ?? "",
+      "sendingPeerID": sendingPeerID ?? "",
+      "networkStatus": networkStatus,
+      "lastError": lastError ?? "",
+    ]
+    guard snapshot != lastDiagnosticState else { return }
+    lastDiagnosticState = snapshot
+    UserDefaults.standard.set(snapshot, forKey: "diagnostics.currentRouteState")
+    UserDefaults.standard.set(Date(), forKey: "diagnostics.currentRouteStateAt")
   }
 }

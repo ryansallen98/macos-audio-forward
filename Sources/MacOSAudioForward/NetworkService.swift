@@ -36,12 +36,17 @@ final class NetworkService {
   private var browser: NWBrowser?
   private var outgoingConnection: NWConnection?
   private var outgoingPeer: DiscoveredPeer?
+  private var outgoingTimeout: DispatchWorkItem?
+  private var outgoingHeartbeat: DispatchSourceTimer?
+  private var lastOutgoingPong = DispatchTime.now().uptimeNanoseconds
   private var outgoingSequence: UInt32 = 0
   private var outgoingDecoder = ForwardStreamDecoder()
   private var incomingConnection: NWConnection?
   private var incomingDecoder = ForwardStreamDecoder()
   private var incomingHandshake: ForwardHandshake?
+  private var incomingHandshakeTimeout: DispatchWorkItem?
   private var peerMetadataByService: [String: [String: String]] = [:]
+  private var started = false
 
   init(instanceID: String, localName: String, appVersion: String) {
     self.instanceID = instanceID
@@ -85,26 +90,17 @@ final class NetworkService {
     }
     listener.start(queue: queue)
     self.listener = listener
-
-    let browser = NWBrowser(
-      for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil),
-      using: Self.tcpParameters())
-    browser.browseResultsChangedHandler = { [weak self] results, _ in
-      self?.updatePeers(from: results)
-    }
-    browser.stateUpdateHandler = { [weak self] state in
-      if case .failed(let error) = state {
-        self?.reportError("Peer discovery failed: \(error.localizedDescription)")
-      }
-    }
-    browser.start(queue: queue)
-    self.browser = browser
+    started = true
+    startBrowserLocked(clearPeers: false)
   }
 
   func stop() {
     queue.async { [weak self] in
       guard let self else { return }
+      self.started = false
       self.stopSendingLocked(reason: nil)
+      self.incomingHandshakeTimeout?.cancel()
+      self.incomingHandshakeTimeout = nil
       self.incomingConnection?.cancel()
       self.incomingConnection = nil
       self.listener?.cancel()
@@ -131,6 +127,14 @@ final class NetworkService {
         self.handleOutgoingState(state, connection: connection, peer: peer)
       }
       connection.start(queue: self.queue)
+      let timeout = DispatchWorkItem { [weak self, weak connection] in
+        guard let self, let connection, connection === self.outgoingConnection else { return }
+        guard connection.state != .ready else { return }
+        self.stopSendingLocked(reason: "The Thunderbolt connection attempt timed out and will retry.")
+        self.restartBrowserLocked()
+      }
+      self.outgoingTimeout = timeout
+      self.queue.asyncAfter(deadline: .now() + 6, execute: timeout)
     }
   }
 
@@ -152,7 +156,7 @@ final class NetworkService {
         payload: payload
       )
       self.outgoingSequence &+= 1
-      self.send(message, over: connection)
+      self.sendOutgoing(message, over: connection)
     }
   }
 
@@ -167,6 +171,43 @@ final class NetworkService {
     parameters.includePeerToPeer = false
     parameters.serviceClass = .interactiveVoice
     return parameters
+  }
+
+  private func startBrowserLocked(clearPeers: Bool) {
+    guard started else { return }
+    if clearPeers {
+      peerMetadataByService.removeAll()
+      DispatchQueue.main.async { [weak self] in self?.onPeersChanged?([]) }
+    }
+
+    let browser = NWBrowser(
+      for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil),
+      using: Self.tcpParameters())
+    browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
+      guard let self, let browser, browser === self.browser else { return }
+      self.updatePeers(from: results)
+    }
+    browser.stateUpdateHandler = { [weak self, weak browser] state in
+      guard let self, let browser, browser === self.browser else { return }
+      if case .failed(let error) = state {
+        self.reportError("Peer discovery failed: \(error.localizedDescription)")
+        self.queue.asyncAfter(deadline: .now() + 1) { [weak self, weak browser] in
+          guard let self, let browser, browser === self.browser else { return }
+          self.restartBrowserLocked()
+        }
+      }
+    }
+    self.browser = browser
+    browser.start(queue: queue)
+  }
+
+  private func restartBrowserLocked() {
+    guard started else { return }
+    browser?.browseResultsChangedHandler = nil
+    browser?.stateUpdateHandler = nil
+    browser?.cancel()
+    browser = nil
+    startBrowserLocked(clearPeers: true)
   }
 
   private func updatePeers(from results: Set<NWBrowser.Result>) {
@@ -220,6 +261,8 @@ final class NetworkService {
     guard connection === outgoingConnection else { return }
     switch state {
     case .ready:
+      outgoingTimeout?.cancel()
+      outgoingTimeout = nil
       let actualInterface = connection.currentPath?.availableInterfaces.first(where: { $0.name == "bridge0" })
       guard actualInterface != nil else {
         stopSendingLocked(reason: "The connection did not use Thunderbolt Bridge.")
@@ -228,8 +271,9 @@ final class NetworkService {
       do {
         let hello = try ForwardMessage.hello(
           ForwardHandshake(id: instanceID, name: localName, version: appVersion))
-        send(hello, over: connection)
+        sendOutgoing(hello, over: connection)
         receiveOutgoingControl(on: connection)
+        startOutgoingHeartbeat(on: connection)
         DispatchQueue.main.async { [weak self] in self?.onOutgoingReady?(peer) }
       } catch {
         stopSendingLocked(reason: error.localizedDescription)
@@ -248,9 +292,14 @@ final class NetworkService {
   }
 
   private func stopSendingLocked(reason: String?) {
+    outgoingTimeout?.cancel()
+    outgoingTimeout = nil
+    outgoingHeartbeat?.setEventHandler {}
+    outgoingHeartbeat?.cancel()
+    outgoingHeartbeat = nil
     if let connection = outgoingConnection {
       if connection.state == .ready {
-        send(
+        sendOutgoing(
           ForwardMessage(
             kind: .goodbye,
             channels: 0,
@@ -274,7 +323,9 @@ final class NetworkService {
   }
 
   private func accept(_ connection: NWConnection) {
-    incomingConnection?.cancel()
+    if let existing = incomingConnection {
+      stopIncoming(existing, error: nil)
+    }
     incomingConnection = connection
     incomingDecoder = ForwardStreamDecoder()
     incomingHandshake = nil
@@ -290,6 +341,15 @@ final class NetworkService {
           self.stopIncoming(connection, error: "Rejected a connection outside Thunderbolt Bridge.")
           return
         }
+        let timeout = DispatchWorkItem { [weak self, weak connection] in
+          guard let self, let connection,
+            connection === self.incomingConnection,
+            self.incomingHandshake == nil
+          else { return }
+          self.stopIncoming(connection, error: "The peer did not complete its audio handshake.")
+        }
+        self.incomingHandshakeTimeout = timeout
+        self.queue.asyncAfter(deadline: .now() + 3, execute: timeout)
         self.receiveIncoming(on: connection)
       case .failed(let error):
         self.stopIncoming(connection, error: error.localizedDescription)
@@ -332,22 +392,29 @@ final class NetworkService {
     switch message.kind {
     case .hello:
       let handshake = try JSONDecoder().decode(ForwardHandshake.self, from: message.payload)
+      incomingHandshakeTimeout?.cancel()
+      incomingHandshakeTimeout = nil
       incomingHandshake = handshake
       DispatchQueue.main.async { [weak self] in self?.onIncomingStarted?(handshake) }
     case .audio:
       guard incomingHandshake != nil else { return }
-      DispatchQueue.main.async { [weak self] in self?.onAudio?(message) }
+      // Audio must never wait behind AppKit or SwiftUI work. PlaybackEngine owns
+      // its dedicated producer queue and accepts packets directly from here.
+      onAudio?(message)
     case .goodbye:
       if let connection = incomingConnection {
         stopIncoming(connection, error: nil)
       }
     case .ping:
-      break
+      guard incomingHandshake != nil, let connection = incomingConnection else { return }
+      sendIncomingControl(Self.pingMessage, over: connection)
     }
   }
 
   private func stopIncoming(_ connection: NWConnection, error: String?) {
     guard connection === incomingConnection else { return }
+    incomingHandshakeTimeout?.cancel()
+    incomingHandshakeTimeout = nil
     connection.stateUpdateHandler = nil
     connection.cancel()
     incomingConnection = nil
@@ -365,6 +432,9 @@ final class NetworkService {
       if let content, !content.isEmpty {
         do {
           let messages = try self.outgoingDecoder.append(content)
+          if messages.contains(where: { $0.kind == .ping }) {
+            self.lastOutgoingPong = DispatchTime.now().uptimeNanoseconds
+          }
           if messages.contains(where: { $0.kind == .goodbye }) {
             self.stopSendingLocked(reason: nil)
             return
@@ -384,9 +454,51 @@ final class NetworkService {
     }
   }
 
-  private func send(_ message: ForwardMessage, over connection: NWConnection) {
+  private func startOutgoingHeartbeat(on connection: NWConnection) {
+    outgoingHeartbeat?.cancel()
+    lastOutgoingPong = DispatchTime.now().uptimeNanoseconds
+    let heartbeat = DispatchSource.makeTimerSource(queue: queue)
+    heartbeat.schedule(
+      deadline: .now() + 1,
+      repeating: .seconds(1),
+      leeway: .milliseconds(100))
+    heartbeat.setEventHandler { [weak self, weak connection] in
+      guard let self, let connection, connection === self.outgoingConnection else { return }
+      let now = DispatchTime.now().uptimeNanoseconds
+      let secondsSincePong = Double(now - self.lastOutgoingPong) / 1_000_000_000
+      guard secondsSincePong <= 4 else {
+        self.stopSendingLocked(
+          reason: "The Thunderbolt audio link stopped responding and will reconnect.")
+        self.restartBrowserLocked()
+        return
+      }
+      self.sendOutgoing(Self.pingMessage, over: connection)
+    }
+    outgoingHeartbeat = heartbeat
+    heartbeat.resume()
+  }
+
+  private static var pingMessage: ForwardMessage {
+    ForwardMessage(
+      kind: .ping,
+      channels: 0,
+      sampleRate: 0,
+      frames: 0,
+      sequence: 0,
+      payload: Data())
+  }
+
+  private func sendOutgoing(_ message: ForwardMessage, over connection: NWConnection) {
     connection.send(content: message.encoded(), completion: .contentProcessed { [weak self] error in
-      if let error { self?.stopSendingLocked(reason: error.localizedDescription) }
+      guard let self, connection === self.outgoingConnection else { return }
+      if let error { self.stopSendingLocked(reason: error.localizedDescription) }
+    })
+  }
+
+  private func sendIncomingControl(_ message: ForwardMessage, over connection: NWConnection) {
+    connection.send(content: message.encoded(), completion: .contentProcessed { [weak self] error in
+      guard let self, connection === self.incomingConnection else { return }
+      if let error { self.stopIncoming(connection, error: error.localizedDescription) }
     })
   }
 

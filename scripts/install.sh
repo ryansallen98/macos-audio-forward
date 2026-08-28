@@ -12,6 +12,7 @@ fi
 
 osascript -e 'tell application "Audio Forward" to quit' 2>/dev/null || true
 osascript -e 'tell application "macOS Audio Forward" to quit' 2>/dev/null || true
+pkill -TERM -x MacOSAudioForward 2>/dev/null || true
 for attempt in 1 2 3 4 5; do
     pgrep -x MacOSAudioForward >/dev/null || break
     sleep 1
@@ -22,5 +23,5 @@ if [[ -d "$LEGACY_APP" ]]; then
 fi
 
 ditto "$APP_SOURCE" "$APP_DESTINATION"
-open -n "$APP_DESTINATION"
+open "$APP_DESTINATION"
 echo "$APP_DESTINATION"

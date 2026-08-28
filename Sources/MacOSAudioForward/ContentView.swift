@@ -160,10 +160,12 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 2) {
           Text("Receiving from").font(.caption).foregroundStyle(.secondary)
           Text(model.incomingPeerName ?? "Another Mac").font(.body.weight(.medium))
+          Text(playbackQualityDetail)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         Spacer()
         Image(systemName: "waveform")
-          .symbolEffect(.variableColor.iterative)
           .foregroundStyle(.green)
       }
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -171,6 +173,18 @@ struct ContentView: View {
       Label("Incoming Audio", systemImage: "arrow.down.circle")
         .font(.subheadline.weight(.semibold))
     }
+  }
+
+  private var playbackQualityDetail: String {
+    let metrics = model.playbackMetrics
+    if !metrics.isPrimed {
+      return "Building a lossless playback buffer…"
+    }
+    return String(
+      format: "%@ · Lossless PCM · %.0f ms buffer · %.1f ms variation",
+      metrics.qualityText,
+      metrics.bufferedMilliseconds,
+      metrics.arrivalJitterMilliseconds)
   }
 
   private func errorCard(_ message: String) -> some View {

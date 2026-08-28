@@ -1,13 +1,22 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
-  private let model = AudioForwardModel()
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+  private lazy var model = AudioForwardModel()
   private var statusItem: NSStatusItem!
   private var popover: NSPopover!
+  private var instanceLockFileDescriptor: Int32 = -1
+  private var isPrimaryInstance = false
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    guard claimPrimaryInstance() else {
+      activateExistingInstance()
+      NSApp.terminate(nil)
+      return
+    }
+    isPrimaryInstance = true
     NSApp.setActivationPolicy(.accessory)
     configurePopover()
     configureStatusItem()
@@ -15,7 +24,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
-    model.stop()
+    if isPrimaryInstance {
+      model.stop()
+    }
+    releasePrimaryInstance()
+  }
+
+  private func claimPrimaryInstance() -> Bool {
+    guard let applicationSupport = FileManager.default.urls(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask
+    ).first else { return true }
+
+    let lockURL = applicationSupport.appendingPathComponent(
+      "dev.rallen.macos-audio-forward.instance.lock",
+      isDirectory: false)
+    let descriptor = Darwin.open(
+      lockURL.path,
+      O_CREAT | O_RDWR,
+      S_IRUSR | S_IWUSR)
+    guard descriptor >= 0 else { return true }
+    guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+      Darwin.close(descriptor)
+      return false
+    }
+    instanceLockFileDescriptor = descriptor
+    return true
+  }
+
+  private func releasePrimaryInstance() {
+    guard instanceLockFileDescriptor >= 0 else { return }
+    flock(instanceLockFileDescriptor, LOCK_UN)
+    Darwin.close(instanceLockFileDescriptor)
+    instanceLockFileDescriptor = -1
+  }
+
+  private func activateExistingInstance() {
+    guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
+    NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+      .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier })?
+      .activate()
   }
 
   private func configureStatusItem() {
@@ -36,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     popover = NSPopover()
     popover.behavior = .transient
     popover.animates = true
+    popover.delegate = self
     popover.contentViewController = NSHostingController(rootView: ContentView(model: model))
   }
 
@@ -50,7 +99,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     popover.contentSize = NSSize(width: 410, height: contentHeight)
     popover.contentViewController = NSHostingController(
       rootView: ContentView(model: model, contentHeight: contentHeight))
+    model.setInterfaceVisible(true)
     popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+  }
+
+  func popoverDidClose(_ notification: Notification) {
+    model.setInterfaceVisible(false)
   }
 
   private func preferredContentHeight(on screen: NSScreen?) -> CGFloat {

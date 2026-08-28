@@ -82,14 +82,47 @@ enum CoreAudioUtility {
     }
   }
 
-  static func cleanupStaleAggregates() {
-    for device in outputDevices() {
-      guard
-        let uid = stringProperty(kAudioDevicePropertyDeviceUID, object: device),
-        uid.hasPrefix(aggregateUIDPrefix)
-      else { continue }
+  @discardableResult
+  static func cleanupStaleAggregates() -> AudioDeviceID? {
+    let devices = outputDevices()
+    let staleDevices = devices.filter {
+      stringProperty(kAudioDevicePropertyDeviceUID, object: $0)?.hasPrefix(aggregateUIDPrefix) == true
+    }
+    guard !staleDevices.isEmpty else { return nil }
+
+    let staleIDs = Set(staleDevices)
+    let currentOutput = try? defaultOutputDevice()
+    let currentSystemOutput = try? defaultOutputDevice(systemSounds: true)
+    let physicalFallback = [currentOutput, currentSystemOutput]
+      .compactMap { $0 }
+      .first(where: { !staleIDs.contains($0) && hasOutputStreams($0) })
+      ?? devices.first(where: { !staleIDs.contains($0) && hasOutputStreams($0) })
+
+    if let physicalFallback {
+      // Resolve the UID before touching the stale default. This verifies that
+      // Core Audio can immediately use the replacement as an aggregate base.
+      guard (try? uid(of: physicalFallback)) != nil else { return nil }
+      if let currentOutput, staleIDs.contains(currentOutput) {
+        try? setDefaultOutputDevice(physicalFallback)
+      }
+      if let currentSystemOutput, staleIDs.contains(currentSystemOutput) {
+        try? setDefaultOutputDevice(physicalFallback, systemSounds: true)
+      }
+    }
+
+    for device in staleDevices {
       _ = AudioHardwareDestroyAggregateDevice(device)
     }
+    return physicalFallback
+  }
+
+  static func hasOutputStreams(_ device: AudioDeviceID) -> Bool {
+    var address = propertyAddress(
+      kAudioDevicePropertyStreams,
+      scope: kAudioDevicePropertyScopeOutput)
+    var size: UInt32 = 0
+    return AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr
+      && size >= UInt32(MemoryLayout<AudioStreamID>.size)
   }
 
   static func stringProperty(

@@ -9,8 +9,14 @@ let package = Package(
     .executable(name: "MacOSAudioForward", targets: ["MacOSAudioForward"])
   ],
   targets: [
+    .target(
+      name: "AudioForwardBuffer",
+      path: "Sources/AudioForwardBuffer",
+      publicHeadersPath: "include"
+    ),
     .executableTarget(
       name: "MacOSAudioForward",
+      dependencies: ["AudioForwardBuffer"],
       path: "Sources/MacOSAudioForward",
       linkerSettings: [
         .linkedFramework("AppKit"),
