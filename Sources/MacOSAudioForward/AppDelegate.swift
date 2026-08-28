@@ -13,6 +13,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     configurePopover()
     configureStatusItem()
     model.start()
+    DispatchQueue.main.async { [weak self] in
+      self?.presentSettings()
+    }
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -20,12 +23,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   }
 
   private func configureStatusItem() {
-    statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    statusItem.autosaveName = "dev.rallen.macos-audio-forward.status-item"
+    statusItem.isVisible = true
     guard let button = statusItem.button else { return }
     button.image = NSImage(
       systemSymbolName: "speaker.wave.2.fill",
       accessibilityDescription: "macOS Audio Forward")
     button.image?.isTemplate = true
+    button.title = " Audio"
     button.toolTip = "macOS Audio Forward"
     button.target = self
     button.action = #selector(togglePopover)
@@ -42,6 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     guard let button = statusItem.button else { return }
     if let settingsPanel, settingsPanel.isVisible {
       settingsPanel.close()
+      return
+    }
+    if isBartenderRunning {
+      presentSettings()
       return
     }
     if popover.isShown {
@@ -61,6 +71,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     popover.contentViewController = NSHostingController(
       rootView: ContentView(model: model, contentHeight: contentHeight))
     popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+  }
+
+  private func presentSettings() {
+    popover.performClose(nil)
+    if let settingsPanel {
+      NSApp.activate(ignoringOtherApps: true)
+      settingsPanel.makeKeyAndOrderFront(nil)
+      return
+    }
+
+    let targetScreen = screen(containing: NSEvent.mouseLocation)
+      ?? NSScreen.main
+      ?? NSScreen.screens.first
+    guard let targetScreen else { return }
+    showSettingsPanel(on: targetScreen, contentHeight: preferredContentHeight(on: targetScreen))
   }
 
   private func showSettingsPanel(on screen: NSScreen, contentHeight: CGFloat) {
@@ -98,11 +123,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) }
   }
 
+  private var isBartenderRunning: Bool {
+    !NSRunningApplication.runningApplications(
+      withBundleIdentifier: "com.surteesstudios.Bartender"
+    ).isEmpty
+  }
+
   func windowWillClose(_ notification: Notification) {
     if notification.object as? NSPanel === settingsPanel { settingsPanel = nil }
   }
 
-  func windowDidResignKey(_ notification: Notification) {
-    if notification.object as? NSPanel === settingsPanel { settingsPanel?.close() }
+  func applicationShouldHandleReopen(
+    _ sender: NSApplication,
+    hasVisibleWindows flag: Bool
+  ) -> Bool {
+    presentSettings()
+    return false
   }
 }

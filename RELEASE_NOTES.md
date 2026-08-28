@@ -1,10 +1,13 @@
-# macOS Audio Forward 0.1.0
+# macOS Audio Forward 0.1.1
 
-The first public preview of macOS Audio Forward, a native menu-bar utility that sends system audio directly between two Macs over a Thunderbolt Bridge without using AirPlay.
+This update makes the app immediately visible on launch while retaining its menu-bar workflow.
 
 ## Highlights
 
 - Install the same app on both Macs.
+- See the control panel immediately after opening the app or reopening it from Finder.
+- Find the persistent **Audio** control in the menu bar.
+- Open a reliable floating control panel when the item is hosted by Bartender 6.
 - Discover peers automatically over `bridge0`.
 - Send in either direction from the menu bar.
 - Play through the receiving Mac's current default output.
