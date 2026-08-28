@@ -1,13 +1,13 @@
-# macOS Audio Forward 0.1.1
+# macOS Audio Forward 0.1.2
 
-This update makes the app immediately visible on launch while retaining its menu-bar workflow.
+This update restores the intended menu-bar-only workflow and improves Bartender 6 discovery.
 
 ## Highlights
 
 - Install the same app on both Macs.
-- See the control panel immediately after opening the app or reopening it from Finder.
-- Find the persistent **Audio** control in the menu bar.
-- Open a reliable floating control panel when the item is hosted by Bartender 6.
+- Find the persistent **Audio** control in the menu bar or Bartender.
+- Click **Audio** to open an anchored menu-bar dropdown.
+- Run without any standalone window or Dock icon.
 - Discover peers automatically over `bridge0`.
 - Send in either direction from the menu bar.
 - Play through the receiving Mac's current default output.

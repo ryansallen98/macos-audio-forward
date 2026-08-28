@@ -2,20 +2,16 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
   private let model = AudioForwardModel()
   private var statusItem: NSStatusItem!
   private var popover: NSPopover!
-  private var settingsPanel: NSPanel?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
     configurePopover()
     configureStatusItem()
     model.start()
-    DispatchQueue.main.async { [weak self] in
-      self?.presentSettings()
-    }
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -46,98 +42,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
   @objc private func togglePopover() {
     guard let button = statusItem.button else { return }
-    if let settingsPanel, settingsPanel.isVisible {
-      settingsPanel.close()
-      return
-    }
-    if isBartenderRunning {
-      presentSettings()
-      return
-    }
     if popover.isShown {
       popover.performClose(nil)
       return
     }
 
-    let clickedScreen = screen(containing: NSEvent.mouseLocation)
-    let statusItemScreen = button.window?.screen
-    let contentHeight = preferredContentHeight(on: clickedScreen ?? statusItemScreen)
-    if let clickedScreen, statusItemScreen?.frame != clickedScreen.frame {
-      showSettingsPanel(on: clickedScreen, contentHeight: contentHeight)
-      return
-    }
-
+    let contentHeight = preferredContentHeight(on: button.window?.screen)
     popover.contentSize = NSSize(width: 410, height: contentHeight)
     popover.contentViewController = NSHostingController(
       rootView: ContentView(model: model, contentHeight: contentHeight))
     popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
   }
 
-  private func presentSettings() {
-    popover.performClose(nil)
-    if let settingsPanel {
-      NSApp.activate(ignoringOtherApps: true)
-      settingsPanel.makeKeyAndOrderFront(nil)
-      return
-    }
-
-    let targetScreen = screen(containing: NSEvent.mouseLocation)
-      ?? NSScreen.main
-      ?? NSScreen.screens.first
-    guard let targetScreen else { return }
-    showSettingsPanel(on: targetScreen, contentHeight: preferredContentHeight(on: targetScreen))
-  }
-
-  private func showSettingsPanel(on screen: NSScreen, contentHeight: CGFloat) {
-    let panel = NSPanel(
-      contentRect: NSRect(x: 0, y: 0, width: 410, height: contentHeight),
-      styleMask: [.titled, .closable, .fullSizeContentView],
-      backing: .buffered,
-      defer: false)
-    panel.title = "macOS Audio Forward"
-    panel.titleVisibility = .hidden
-    panel.titlebarAppearsTransparent = true
-    panel.isFloatingPanel = true
-    panel.isReleasedWhenClosed = false
-    panel.hidesOnDeactivate = false
-    panel.collectionBehavior = [.moveToActiveSpace, .transient]
-    panel.delegate = self
-    panel.contentViewController = NSHostingController(
-      rootView: ContentView(model: model, contentHeight: contentHeight))
-
-    let visible = screen.visibleFrame
-    let mouseX = NSEvent.mouseLocation.x
-    let x = min(max(mouseX - 205, visible.minX + 8), visible.maxX - 418)
-    panel.setFrameTopLeftPoint(NSPoint(x: x, y: visible.maxY - 8))
-    settingsPanel = panel
-    NSApp.activate(ignoringOtherApps: true)
-    panel.makeKeyAndOrderFront(nil)
-  }
-
   private func preferredContentHeight(on screen: NSScreen?) -> CGFloat {
     let availableHeight = (screen?.visibleFrame.height ?? 610) - 24
     return max(330, min(600, availableHeight))
-  }
-
-  private func screen(containing point: NSPoint) -> NSScreen? {
-    NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) }
-  }
-
-  private var isBartenderRunning: Bool {
-    !NSRunningApplication.runningApplications(
-      withBundleIdentifier: "com.surteesstudios.Bartender"
-    ).isEmpty
-  }
-
-  func windowWillClose(_ notification: Notification) {
-    if notification.object as? NSPanel === settingsPanel { settingsPanel = nil }
-  }
-
-  func applicationShouldHandleReopen(
-    _ sender: NSApplication,
-    hasVisibleWindows flag: Bool
-  ) -> Bool {
-    presentSettings()
-    return false
   }
 }

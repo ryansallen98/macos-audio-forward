@@ -34,15 +34,13 @@ Install the app on both Macs:
 
 1. Download the latest `macOS-Audio-Forward` ZIP from Releases.
 2. Unzip it and move **macOS Audio Forward.app** into `/Applications` on each Mac.
-3. Open the app on both Macs. Its control panel opens immediately and an **Audio** control remains in each menu bar after the panel closes.
+3. Open the app on both Macs. An **Audio** control appears in each menu bar; click it to open the dropdown.
 4. The first time you send, allow **System Audio Recording** when macOS asks.
 5. On the sending Mac, open the menu and click **Send Audio** beside the destination Mac.
 
 ### Bartender 6
 
-Audio Forward gives its status item a stable identity and label so Bartender can index it consistently. When Bartender 6 is running, clicking **Audio** from the Bartender Bar, a group, or Quick Search opens a standalone control panel instead of trying to anchor a popover to the hidden original item. You can place **Audio** in Bartender's **Always Shown**, **Hidden**, or grouped section; forwarding behavior is unchanged.
-
-Opening **macOS Audio Forward.app** again from `/Applications` always brings the control panel back, even when Bartender has hidden the menu-bar item.
+Audio Forward gives its status item a stable identity and label so Bartender can index it consistently. Place **Audio** in Bartender's **Always Shown**, **Hidden**, or grouped section. Clicking the item opens the same anchored menu-bar dropdown; the app never opens a standalone window or adds a Dock icon.
 
 The sender's default output changes to a temporary output named `<destination> via Thunderbolt`. Stopping the stream, quitting the app, or losing the connection restores the previous output. The receiving Mac plays the stream through whichever output it currently uses.
 
